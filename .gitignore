@@ -1,0 +1,16 @@
+# Build artifacts
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# Python
+__pycache__/
+*.pyc
+
+# Heavy model weights and binary files
+models/*.bin
+models/*.pimi
+test/*.bin
