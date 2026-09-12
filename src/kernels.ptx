@@ -1,0 +1,309 @@
+.version 3.0
+.target sm_20
+.address_size 64
+
+.visible .entry vec_add(
+    .param .u64 param_a,
+    .param .u64 param_b,
+    .param .u64 param_c,
+    .param .u32 param_n
+) {
+    .reg .pred %p;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<3>;
+
+    mov.u32 %r0, %ctaid.x;
+    mov.u32 %r1, %ntid.x;
+    mov.u32 %r2, %tid.x;
+    mad.lo.s32 %r3, %r0, %r1, %r2;
+
+    ld.param.u32 %r4, [param_n];
+    setp.ge.s32 %p, %r3, %r4;
+    @%p bra done;
+
+    ld.param.u64 %rd1, [param_a];
+    ld.param.u64 %rd2, [param_b];
+    ld.param.u64 %rd3, [param_c];
+
+    mul.wide.s32 %rd4, %r3, 4;
+    add.s64 %rd5, %rd1, %rd4;
+    add.s64 %rd6, %rd2, %rd4;
+    add.s64 %rd7, %rd3, %rd4;
+
+    ld.global.f32 %f1, [%rd5];
+    ld.global.f32 %f2, [%rd6];
+    add.f32 %f0, %f1, %f2;
+    st.global.f32 [%rd7], %f0;
+
+done:
+    ret;
+}
+
+.visible .entry gemm_naive(
+    .param .u64 param_a,
+    .param .u64 param_b,
+    .param .u64 param_c,
+    .param .u32 param_m,
+    .param .u32 param_n,
+    .param .u32 param_k
+) {
+    .reg .pred %p<4>;
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<5>;
+
+    ld.param.u32 %r0, [param_m];
+    ld.param.u32 %r1, [param_n];
+    ld.param.u32 %r2, [param_k];
+
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.s32 %r6, %r3, %r4, %r5;
+
+    mov.u32 %r3, %ctaid.y;
+    mov.u32 %r4, %ntid.y;
+    mov.u32 %r5, %tid.y;
+    mad.lo.s32 %r7, %r3, %r4, %r5;
+
+    setp.ge.s32 %p0, %r7, %r0;
+    @%p0 bra done;
+    setp.ge.s32 %p1, %r6, %r1;
+    @%p1 bra done;
+
+    ld.param.u64 %rd0, [param_a];
+    ld.param.u64 %rd1, [param_b];
+    ld.param.u64 %rd2, [param_c];
+
+    mov.f32 %f0, 0.0;
+    mov.u32 %r8, 0;
+
+loop:
+    setp.ge.s32 %p2, %r8, %r2;
+    @%p2 bra write;
+
+    mad.lo.s32 %r9, %r7, %r2, %r8;
+    mul.wide.s32 %rd3, %r9, 4;
+    add.s64 %rd4, %rd0, %rd3;
+    ld.global.f32 %f1, [%rd4];
+
+    mad.lo.s32 %r10, %r8, %r1, %r6;
+    mul.wide.s32 %rd5, %r10, 4;
+    add.s64 %rd6, %rd1, %rd5;
+    ld.global.f32 %f2, [%rd6];
+
+    fma.rn.f32 %f0, %f1, %f2, %f0;
+
+    add.s32 %r8, %r8, 1;
+    bra loop;
+
+write:
+    mad.lo.s32 %r11, %r7, %r1, %r6;
+    mul.wide.s32 %rd7, %r11, 4;
+    add.s64 %rd7, %rd2, %rd7;
+    st.global.f32 [%rd7], %f0;
+
+done:
+    ret;
+}
+
+.visible .entry add_bias(
+    .param .u64 param_x,
+    .param .u64 param_bias,
+    .param .u32 param_rows,
+    .param .u32 param_cols
+) {
+    .reg .pred %p<4>;
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<3>;
+
+    ld.param.u32 %r0, [param_rows];
+    ld.param.u32 %r1, [param_cols];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+
+    mov.u32 %r2, %ctaid.y;
+    mov.u32 %r3, %ntid.y;
+    mov.u32 %r4, %tid.y;
+    mad.lo.s32 %r6, %r2, %r3, %r4;
+
+    setp.ge.s32 %p0, %r6, %r0;
+    @%p0 bra done;
+    setp.ge.s32 %p1, %r5, %r1;
+    @%p1 bra done;
+
+    ld.param.u64 %rd0, [param_x];
+    ld.param.u64 %rd1, [param_bias];
+
+    mad.lo.s32 %r7, %r6, %r1, %r5;
+    mul.wide.s32 %rd2, %r7, 4;
+    add.s64 %rd3, %rd0, %rd2;
+    ld.global.f32 %f0, [%rd3];
+
+    mul.wide.s32 %rd4, %r5, 4;
+    add.s64 %rd5, %rd1, %rd4;
+    ld.global.f32 %f1, [%rd5];
+
+    add.f32 %f2, %f0, %f1;
+    st.global.f32 [%rd3], %f2;
+
+done:
+    ret;
+}
+
+.visible .entry gelu_new(
+    .param .u64 param_x,
+    .param .u64 param_out,
+    .param .u32 param_n
+) {
+    .reg .pred %p<4>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<6>;
+    .reg .f32 %f<12>;
+
+    mov.u32 %r0, %ctaid.x;
+    mov.u32 %r1, %ntid.x;
+    mov.u32 %r2, %tid.x;
+    mad.lo.s32 %r3, %r0, %r1, %r2;
+
+    ld.param.u32 %r4, [param_n];
+    setp.ge.s32 %p0, %r3, %r4;
+    @%p0 bra done;
+
+    ld.param.u64 %rd0, [param_x];
+    ld.param.u64 %rd1, [param_out];
+
+    mul.wide.s32 %rd2, %r3, 4;
+    add.s64 %rd3, %rd0, %rd2;
+    add.s64 %rd4, %rd1, %rd2;
+
+    ld.global.f32 %f0, [%rd3];
+
+    mul.f32 %f1, %f0, %f0;
+    mul.f32 %f2, %f1, %f0;
+    fma.rn.f32 %f3, %f2, 0f3d37353f, %f0;
+    mul.f32 %f4, %f3, 0f3f4c422a;
+
+    max.f32 %f4, %f4, 0fc1200000;
+    min.f32 %f4, %f4, 0f41200000;
+
+    mul.f32 %f5, %f4, 0f4038aa3b;
+    ex2.approx.f32 %f6, %f5;
+
+    sub.f32 %f7, %f6, 1.0;
+    add.f32 %f8, %f6, 1.0;
+    rcp.approx.f32 %f9, %f8;
+    mul.f32 %f10, %f7, %f9;
+
+    add.f32 %f11, %f10, 1.0;
+    mul.f32 %f11, %f11, %f0;
+    mul.f32 %f11, %f11, 0.5;
+
+    st.global.f32 [%rd4], %f11;
+
+done:
+    ret;
+}
+
+.visible .entry layernorm_row(
+    .param .u64 param_x,
+    .param .u64 param_gamma,
+    .param .u64 param_beta,
+    .param .u64 param_out,
+    .param .u32 param_rows,
+    .param .u32 param_cols,
+    .param .f32 param_eps
+) {
+    .reg .pred %p<6>;
+    .reg .b32 %r<10>;
+    .reg .b64 %rd<14>;
+    .reg .f32 %f<12>;
+
+    ld.param.u32 %r0, [param_rows];
+    ld.param.u32 %r1, [param_cols];
+    ld.param.f32 %f0, [param_eps];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+
+    setp.ge.s32 %p0, %r5, %r0;
+    @%p0 bra done;
+
+    ld.param.u64 %rd0, [param_x];
+    ld.param.u64 %rd1, [param_gamma];
+    ld.param.u64 %rd2, [param_beta];
+    ld.param.u64 %rd3, [param_out];
+
+    mad.lo.s32 %r6, %r5, %r1, 0;
+    mul.wide.s32 %rd4, %r6, 4;
+    add.s64 %rd5, %rd0, %rd4;
+    add.s64 %rd6, %rd3, %rd4;
+
+    mov.f32 %f1, 0.0;
+    mov.u32 %r7, 0;
+mean_loop:
+    setp.ge.s32 %p1, %r7, %r1;
+    @%p1 bra mean_end;
+    mul.wide.s32 %rd7, %r7, 4;
+    add.s64 %rd8, %rd5, %rd7;
+    ld.global.f32 %f2, [%rd8];
+    add.f32 %f1, %f1, %f2;
+    add.s32 %r7, %r7, 1;
+    bra mean_loop;
+mean_end:
+    cvt.rn.f32.u32 %f3, %r1;
+    rcp.approx.f32 %f4, %f3;
+    mul.f32 %f5, %f1, %f4;
+
+    mov.f32 %f6, 0.0;
+    mov.u32 %r7, 0;
+var_loop:
+    setp.ge.s32 %p2, %r7, %r1;
+    @%p2 bra var_end;
+    mul.wide.s32 %rd7, %r7, 4;
+    add.s64 %rd8, %rd5, %rd7;
+    ld.global.f32 %f2, [%rd8];
+    sub.f32 %f7, %f2, %f5;
+    fma.rn.f32 %f6, %f7, %f7, %f6;
+    add.s32 %r7, %r7, 1;
+    bra var_loop;
+var_end:
+    mul.f32 %f8, %f6, %f4;
+    add.f32 %f8, %f8, %f0;
+    rsqrt.approx.f32 %f9, %f8;
+
+    mov.u32 %r7, 0;
+norm_loop:
+    setp.ge.s32 %p3, %r7, %r1;
+    @%p3 bra done;
+    mul.wide.s32 %rd7, %r7, 4;
+    add.s64 %rd8, %rd5, %rd7;
+    ld.global.f32 %f2, [%rd8];
+
+    sub.f32 %f7, %f2, %f5;
+    mul.f32 %f10, %f7, %f9;
+
+    add.s64 %rd9, %rd1, %rd7;
+    ld.global.f32 %f11, [%rd9];
+    mul.f32 %f10, %f10, %f11;
+
+    add.s64 %rd10, %rd2, %rd7;
+    ld.global.f32 %f11, [%rd10];
+    add.f32 %f10, %f10, %f11;
+
+    add.s64 %rd11, %rd6, %rd7;
+    st.global.f32 [%rd11], %f10;
+
+    add.s32 %r7, %r7, 1;
+    bra norm_loop;
+
+done:
+    ret;
+}
