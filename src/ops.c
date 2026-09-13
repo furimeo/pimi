@@ -74,7 +74,8 @@ static void cpu_layernorm_raw(float *out, const float *x, const float *gamma, co
 static void cpu_attn_causal_raw(float *out, const float *q, const float *k, const float *v,
                                 int seq_len, int hidden_dim, int num_heads) {
     int head_dim = hidden_dim / num_heads;
-    float scale = 1.0f / sqrtf((float)head_dim);
+    // GPT-Neo attention does not scale by sqrt(head_dim)
+    float scale = 1.0f;
 
 
     // Q, K, V are [seq_len, hidden_dim] where hidden_dim = num_heads * head_dim
