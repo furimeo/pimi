@@ -40,11 +40,12 @@ typedef struct {
 struct GptNeoModel {
     GptNeoConfig cfg;
     int max_seq;
+    int mlp_dim;
 
     // Weights
     Tensor *embed_w;
     Tensor *pos_w;
-    LayerWeights layers[4];
+    LayerWeights *layers;
     Tensor *ln_f_w, *ln_f_b;
     Tensor *lm_head_w;
 
@@ -73,7 +74,10 @@ static Tensor* load_tensor(FILE *f, PimiTensorEntry *entries, int num_tensors, c
             Tensor *t = pimi_tensor_new(entries[i].dims, entries[i].ndim, dev);
             if (!t) return NULL;
 
-            fseek(f, (long)entries[i].offset, SEEK_SET);
+            if (fseek(f, (long)entries[i].offset, SEEK_SET) != 0) {
+                pimi_tensor_free(t);
+                return NULL;
+            }
             float *h_buf = (float*)malloc(entries[i].bytes);
             if (!h_buf) {
                 pimi_tensor_free(t);
@@ -89,8 +93,18 @@ static Tensor* load_tensor(FILE *f, PimiTensorEntry *entries, int num_tensors, c
                 memcpy(t->data, h_buf, entries[i].bytes);
             } else {
                 Tensor *t_wrap = pimi_tensor_wrap(h_buf, entries[i].dims, entries[i].ndim, PIMI_DEVICE_CPU);
-                pimi_tensor_copy(t, t_wrap);
+                if (!t_wrap) {
+                    free(h_buf);
+                    pimi_tensor_free(t);
+                    return NULL;
+                }
+                int copy_res = pimi_tensor_copy(t, t_wrap);
                 pimi_tensor_free(t_wrap);
+                if (copy_res != 0) {
+                    free(h_buf);
+                    pimi_tensor_free(t);
+                    return NULL;
+                }
             }
             free(h_buf);
             return t;
@@ -144,16 +158,21 @@ GptNeoModel *model_load(const char *pimi_path, const char *ptx_path, int max_seq
     int H = m->cfg.hidden_dim;
     int V = m->cfg.vocab_size;
 
+    m->layers = (LayerWeights*)calloc(m->cfg.num_layers, sizeof(LayerWeights));
+    if (!m->layers) goto fail;
+
     // Load embeddings on host CPU
     m->embed_w = load_tensor(f, entries, hdr.num_tensors, "embed.weight", PIMI_DEVICE_CPU);
     m->pos_w   = load_tensor(f, entries, hdr.num_tensors, "pos_embed.weight", PIMI_DEVICE_CPU);
+    if (!m->embed_w || !m->pos_w) goto fail;
 
-    // Load 4 layers onto GPU
+    // Load layers onto GPU
     for (int l = 0; l < m->cfg.num_layers; ++l) {
         char name[128];
         #define LOAD_L(field, suffix) do { \
             snprintf(name, sizeof(name), "layers.%d.%s", l, suffix); \
             m->layers[l].field = load_tensor(f, entries, hdr.num_tensors, name, PIMI_DEVICE_CUDA); \
+            if (!m->layers[l].field) goto fail; \
         } while (0)
 
         LOAD_L(ln1_w, "ln_1.weight");
@@ -170,18 +189,22 @@ GptNeoModel *model_load(const char *pimi_path, const char *ptx_path, int max_seq
         LOAD_L(fc_b, "mlp.fc.bias");
         LOAD_L(proj_w, "mlp.proj.weight");
         LOAD_L(proj_b, "mlp.proj.bias");
+        #undef LOAD_L
     }
 
     m->ln_f_w    = load_tensor(f, entries, hdr.num_tensors, "ln_f.weight", PIMI_DEVICE_CUDA);
     m->ln_f_b    = load_tensor(f, entries, hdr.num_tensors, "ln_f.bias", PIMI_DEVICE_CUDA);
     m->lm_head_w = load_tensor(f, entries, hdr.num_tensors, "lm_head.weight", PIMI_DEVICE_CUDA);
+    if (!m->ln_f_w || !m->ln_f_b || !m->lm_head_w) goto fail;
 
-    fclose(f);
-    free(entries);
+    fclose(f); f = NULL;
+    free(entries); entries = NULL;
+
+    m->mlp_dim = (m->cfg.num_layers > 0 && m->layers[0].fc_w) ? m->layers[0].fc_w->dims[1] : (4 * H);
 
     // Pre-allocate GPU activation buffers for max_seq
     int dims_h[2]   = {m->max_seq, H};
-    int dims_mlp[2] = {m->max_seq, 3072};
+    int dims_mlp[2] = {m->max_seq, m->mlp_dim};
     int dims_last_x[2] = {1, H};
     int dims_last_logits[2] = {1, V};
 
@@ -204,8 +227,20 @@ GptNeoModel *model_load(const char *pimi_path, const char *ptx_path, int max_seq
     m->h_last_logits   = pimi_tensor_new(dims_last_logits, 2, PIMI_DEVICE_CPU);
     m->h_staging_emb   = pimi_tensor_new(dims_h, 2, PIMI_DEVICE_CPU);
 
+    if (!m->buf_x || !m->buf_ln1 || !m->buf_q || !m->buf_k || !m->buf_v ||
+        !m->buf_context || !m->buf_attn_out || !m->buf_res1 || !m->buf_ln2 ||
+        !m->buf_mlp_fc || !m->buf_mlp_gelu || !m->buf_mlp_proj ||
+        !m->buf_last_x || !m->buf_last_logits || !m->h_last_logits || !m->h_staging_emb) {
+        goto fail;
+    }
 
     return m;
+
+fail:
+    if (f) fclose(f);
+    if (entries) free(entries);
+    model_free(m);
+    return NULL;
 }
 
 void model_free(GptNeoModel *m) {
@@ -214,20 +249,23 @@ void model_free(GptNeoModel *m) {
     pimi_tensor_free(m->embed_w);
     pimi_tensor_free(m->pos_w);
 
-    for (int l = 0; l < m->cfg.num_layers; ++l) {
-        pimi_tensor_free(m->layers[l].ln1_w);
-        pimi_tensor_free(m->layers[l].ln1_b);
-        pimi_tensor_free(m->layers[l].q_w);
-        pimi_tensor_free(m->layers[l].k_w);
-        pimi_tensor_free(m->layers[l].v_w);
-        pimi_tensor_free(m->layers[l].out_w);
-        pimi_tensor_free(m->layers[l].out_b);
-        pimi_tensor_free(m->layers[l].ln2_w);
-        pimi_tensor_free(m->layers[l].ln2_b);
-        pimi_tensor_free(m->layers[l].fc_w);
-        pimi_tensor_free(m->layers[l].fc_b);
-        pimi_tensor_free(m->layers[l].proj_w);
-        pimi_tensor_free(m->layers[l].proj_b);
+    if (m->layers) {
+        for (int l = 0; l < m->cfg.num_layers; ++l) {
+            pimi_tensor_free(m->layers[l].ln1_w);
+            pimi_tensor_free(m->layers[l].ln1_b);
+            pimi_tensor_free(m->layers[l].q_w);
+            pimi_tensor_free(m->layers[l].k_w);
+            pimi_tensor_free(m->layers[l].v_w);
+            pimi_tensor_free(m->layers[l].out_w);
+            pimi_tensor_free(m->layers[l].out_b);
+            pimi_tensor_free(m->layers[l].ln2_w);
+            pimi_tensor_free(m->layers[l].ln2_b);
+            pimi_tensor_free(m->layers[l].fc_w);
+            pimi_tensor_free(m->layers[l].fc_b);
+            pimi_tensor_free(m->layers[l].proj_w);
+            pimi_tensor_free(m->layers[l].proj_b);
+        }
+        free(m->layers);
     }
 
     pimi_tensor_free(m->ln_f_w);
@@ -295,8 +333,8 @@ float *model_forward(GptNeoModel *m, const int *tokens, int seq_len) {
     m->buf_attn_out->dims[0] = seq_len; m->buf_attn_out->numel = (size_t)seq_len * H;
     m->buf_res1->dims[0]     = seq_len; m->buf_res1->numel     = (size_t)seq_len * H;
     m->buf_ln2->dims[0]      = seq_len; m->buf_ln2->numel      = (size_t)seq_len * H;
-    m->buf_mlp_fc->dims[0]   = seq_len; m->buf_mlp_fc->numel   = (size_t)seq_len * 3072;
-    m->buf_mlp_gelu->dims[0] = seq_len; m->buf_mlp_gelu->numel = (size_t)seq_len * 3072;
+    m->buf_mlp_fc->dims[0]   = seq_len; m->buf_mlp_fc->numel   = (size_t)seq_len * m->mlp_dim;
+    m->buf_mlp_gelu->dims[0] = seq_len; m->buf_mlp_gelu->numel = (size_t)seq_len * m->mlp_dim;
     m->buf_mlp_proj->dims[0] = seq_len; m->buf_mlp_proj->numel = (size_t)seq_len * H;
 
     // Copy embeddings to GPU

@@ -134,6 +134,10 @@ int pimi_matmul(Tensor *out, const Tensor *a, const Tensor *b) {
         fprintf(stderr, "pimi: matmul device mismatch\n");
         return -2;
     }
+    if (a->ndim != 2 || b->ndim != 2 || out->ndim != 2) {
+        fprintf(stderr, "pimi: matmul requires 2D tensors\n");
+        return -3;
+    }
 
     int M = a->dims[0];
     int K = a->dims[1];
@@ -189,10 +193,14 @@ int pimi_add(Tensor *out, const Tensor *a, const Tensor *b) {
 int pimi_add_bias(Tensor *out, const Tensor *bias) {
     if (!out || !bias) return -1;
     if (out->device != bias->device) return -2;
+    if (out->ndim != 2 || bias->ndim != 1) {
+        fprintf(stderr, "pimi: add_bias requires 2D out and 1D bias\n");
+        return -3;
+    }
 
     int rows = out->dims[0];
     int cols = out->dims[1];
-    if (bias->numel != (size_t)cols) {
+    if (bias->dims[0] != cols) {
         fprintf(stderr, "pimi: add_bias shape mismatch\n");
         return -3;
     }
@@ -269,9 +277,15 @@ int pimi_layernorm(Tensor *out, const Tensor *x, const Tensor *gamma, const Tens
 int pimi_attn_causal(Tensor *out, const Tensor *q, const Tensor *k, const Tensor *v, int num_heads) {
     if (!out || !q || !k || !v) return -1;
     if (q->device != k->device || q->device != v->device || q->device != out->device) return -2;
+    if (q->ndim != 2 || k->ndim != 2 || v->ndim != 2 || out->ndim != 2) return -3;
 
     int seq_len = q->dims[0];
     int hidden_dim = q->dims[1];
+    if (k->dims[0] != seq_len || k->dims[1] != hidden_dim ||
+        v->dims[0] != seq_len || v->dims[1] != hidden_dim ||
+        out->dims[0] != seq_len || out->dims[1] != hidden_dim) {
+        return -3;
+    }
 
     if (q->device == PIMI_DEVICE_CPU) {
         cpu_attn_causal_raw((float*)out->data, (const float*)q->data,
@@ -287,17 +301,26 @@ int pimi_attn_causal(Tensor *out, const Tensor *q, const Tensor *k, const Tensor
     float *h_k = (float*)malloc(sz);
     float *h_v = (float*)malloc(sz);
     float *h_out = (float*)malloc(sz);
+    if (!h_q || !h_k || !h_v || !h_out) {
+        free(h_q); free(h_k); free(h_v); free(h_out);
+        return -5;
+    }
 
-    g_cuda.cuMemcpyDtoH_v2(h_q, (CUdeviceptr)(uintptr_t)q->data, sz);
-    g_cuda.cuMemcpyDtoH_v2(h_k, (CUdeviceptr)(uintptr_t)k->data, sz);
-    g_cuda.cuMemcpyDtoH_v2(h_v, (CUdeviceptr)(uintptr_t)v->data, sz);
+    CUresult res = g_cuda.cuMemcpyDtoH_v2(h_q, (CUdeviceptr)(uintptr_t)q->data, sz);
+    if (res == CUDA_SUCCESS) res = g_cuda.cuMemcpyDtoH_v2(h_k, (CUdeviceptr)(uintptr_t)k->data, sz);
+    if (res == CUDA_SUCCESS) res = g_cuda.cuMemcpyDtoH_v2(h_v, (CUdeviceptr)(uintptr_t)v->data, sz);
+
+    if (res != CUDA_SUCCESS) {
+        free(h_q); free(h_k); free(h_v); free(h_out);
+        return -4;
+    }
 
     cpu_attn_causal_raw(h_out, h_q, h_k, h_v, seq_len, hidden_dim, num_heads);
 
-    g_cuda.cuMemcpyHtoD_v2((CUdeviceptr)(uintptr_t)out->data, h_out, sz);
+    res = g_cuda.cuMemcpyHtoD_v2((CUdeviceptr)(uintptr_t)out->data, h_out, sz);
 
     free(h_q); free(h_k); free(h_v); free(h_out);
-    return 0;
+    return (res == CUDA_SUCCESS) ? 0 : -4;
 }
 
 int pimi_softmax_cpu(Tensor *out, const Tensor *x) {

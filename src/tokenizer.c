@@ -93,6 +93,11 @@ Tokenizer *tokenizer_load(const char *path) {
     tok->vocab_size = vocab_size;
     tok->num_merges = num_merges;
     tok->hash_table = (HashEntry*)calloc(HASH_SIZE, sizeof(HashEntry));
+    if (!tok->hash_table) {
+        tokenizer_free(tok);
+        fclose(f);
+        return NULL;
+    }
 
     if (fread(tok->byte_to_token, sizeof(uint32_t), 256, f) != 256) {
         tokenizer_free(tok);
@@ -113,26 +118,57 @@ Tokenizer *tokenizer_load(const char *path) {
 
     // Read vocab strings
     tok->vocab_strings = (char**)calloc(vocab_size, sizeof(char*));
+    if (!tok->vocab_strings) {
+        tokenizer_free(tok);
+        fclose(f);
+        return NULL;
+    }
+
     // First pass to determine total bytes for pool
     long strings_pos = ftell(f);
     size_t total_pool_bytes = 0;
     for (uint32_t i = 0; i < vocab_size; ++i) {
         uint32_t len = 0;
-        if (fread(&len, sizeof(uint32_t), 1, f) != 1) break;
-        fseek(f, len, SEEK_CUR);
+        if (fread(&len, sizeof(uint32_t), 1, f) != 1) {
+            tokenizer_free(tok);
+            fclose(f);
+            return NULL;
+        }
+        if (fseek(f, len, SEEK_CUR) != 0) {
+            tokenizer_free(tok);
+            fclose(f);
+            return NULL;
+        }
         total_pool_bytes += len + 1; // +1 for null terminator
     }
 
-    fseek(f, strings_pos, SEEK_SET);
+    if (fseek(f, strings_pos, SEEK_SET) != 0) {
+        tokenizer_free(tok);
+        fclose(f);
+        return NULL;
+    }
     tok->strings_pool = (char*)malloc(total_pool_bytes + 1);
+    if (!tok->strings_pool) {
+        tokenizer_free(tok);
+        fclose(f);
+        return NULL;
+    }
     char *pool_ptr = tok->strings_pool;
 
     for (uint32_t i = 0; i < vocab_size; ++i) {
         uint32_t len = 0;
-        if (fread(&len, sizeof(uint32_t), 1, f) != 1) break;
+        if (fread(&len, sizeof(uint32_t), 1, f) != 1) {
+            tokenizer_free(tok);
+            fclose(f);
+            return NULL;
+        }
         tok->vocab_strings[i] = pool_ptr;
         if (len > 0) {
-            if (fread(pool_ptr, 1, len, f) != len) break;
+            if (fread(pool_ptr, 1, len, f) != len) {
+                tokenizer_free(tok);
+                fclose(f);
+                return NULL;
+            }
         }
         pool_ptr[len] = '\0';
         pool_ptr += len + 1;
@@ -245,8 +281,13 @@ process_chunk:;
         if (chunk_len <= 0) continue;
 
         // Convert chunk bytes to base token IDs
-        uint32_t t_ids[512];
-        int num_ids = (chunk_len < 512) ? chunk_len : 512;
+        uint32_t stack_ids[256];
+        uint32_t *t_ids = stack_ids;
+        if (chunk_len > 256) {
+            t_ids = (uint32_t*)malloc(chunk_len * sizeof(uint32_t));
+            if (!t_ids) continue;
+        }
+        int num_ids = chunk_len;
         for (int k = 0; k < num_ids; ++k) {
             unsigned char b = (unsigned char)text[chunk_start + k];
             t_ids[k] = tok->byte_to_token[b];
@@ -280,6 +321,10 @@ process_chunk:;
 
         for (int k = 0; k < num_ids && token_count < max_tokens; ++k) {
             out_tokens[token_count++] = (int)t_ids[k];
+        }
+
+        if (t_ids != stack_ids) {
+            free(t_ids);
         }
     }
 

@@ -27,7 +27,14 @@ static char* read_text(const char* path) {
     return b;
 }
 
+static int g_init_count = 0;
+
 int pimi_init(const char *ptx_path) {
+    if (g_init_count > 0) {
+        g_init_count++;
+        return 0;
+    }
+
     if (cuda_drv_init(&g_cuda) != 0) {
         fprintf(stderr, "pimi: cuda not available, falling back to cpu only\n");
         g_cuda_available = 0;
@@ -53,6 +60,8 @@ int pimi_init(const char *ptx_path) {
 
     if (!ptx_code) {
         fprintf(stderr, "pimi: cannot locate kernels.ptx\n");
+        cuda_drv_cleanup(&g_cuda);
+        g_cuda_available = 0;
         return -1;
     }
 
@@ -60,6 +69,8 @@ int pimi_init(const char *ptx_path) {
     free(ptx_code);
     if (res != CUDA_SUCCESS) {
         fprintf(stderr, "pimi: cuModuleLoadData failed (%d)\n", res);
+        cuda_drv_cleanup(&g_cuda);
+        g_cuda_available = 0;
         return -2;
     }
 
@@ -73,15 +84,27 @@ int pimi_init(const char *ptx_path) {
            g_cuda.devName, g_cuda.ccMajor, g_cuda.ccMinor,
            g_cuda.freeMem / (1024 * 1024));
 
+    g_init_count = 1;
     return 0;
 }
 
 void pimi_shutdown(void) {
-    if (g_cuda_available) {
-        cuda_drv_cleanup(&g_cuda);
-        g_cuda_available = 0;
+    if (g_init_count <= 0) return;
+    g_init_count--;
+    if (g_init_count == 0) {
+        if (g_cuda_available) {
+            cuda_drv_cleanup(&g_cuda);
+            g_cuda_available = 0;
+            g_module = NULL;
+            g_fn_vec_add = NULL;
+            g_fn_gemm = NULL;
+            g_fn_add_bias = NULL;
+            g_fn_gelu = NULL;
+            g_fn_layernorm = NULL;
+        }
     }
 }
+
 
 int pimi_has_cuda(void) {
     return g_cuda_available;

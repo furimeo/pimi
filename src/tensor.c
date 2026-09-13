@@ -16,6 +16,11 @@ Tensor *pimi_tensor_new(const int *dims, int ndim, PimiDevice device) {
     t->ndim = ndim;
     t->numel = 1;
     for (int i = 0; i < ndim; ++i) {
+        if (dims[i] <= 0) {
+            fprintf(stderr, "pimi: invalid dimension dims[%d] = %d\n", i, dims[i]);
+            free(t);
+            return NULL;
+        }
         t->dims[i] = dims[i];
         t->numel *= (size_t)dims[i];
     }
@@ -55,6 +60,10 @@ Tensor *pimi_tensor_wrap(void *data, const int *dims, int ndim, PimiDevice devic
     t->ndim = ndim;
     t->numel = 1;
     for (int i = 0; i < ndim; ++i) {
+        if (dims[i] <= 0) {
+            free(t);
+            return NULL;
+        }
         t->dims[i] = dims[i];
         t->numel *= (size_t)dims[i];
     }
@@ -83,18 +92,25 @@ int pimi_tensor_copy(Tensor *dst, const Tensor *src) {
     }
 
     size_t bytes = dst->numel * sizeof(float);
+    CUresult res = CUDA_SUCCESS;
 
     if (dst->device == PIMI_DEVICE_CPU && src->device == PIMI_DEVICE_CPU) {
         memcpy(dst->data, src->data, bytes);
     } else if (dst->device == PIMI_DEVICE_CUDA && src->device == PIMI_DEVICE_CPU) {
-        g_cuda.cuMemcpyHtoD_v2((CUdeviceptr)(uintptr_t)dst->data, src->data, bytes);
+        res = g_cuda.cuMemcpyHtoD_v2((CUdeviceptr)(uintptr_t)dst->data, src->data, bytes);
     } else if (dst->device == PIMI_DEVICE_CPU && src->device == PIMI_DEVICE_CUDA) {
-        g_cuda.cuMemcpyDtoH_v2(dst->data, (CUdeviceptr)(uintptr_t)src->data, bytes);
+        res = g_cuda.cuMemcpyDtoH_v2(dst->data, (CUdeviceptr)(uintptr_t)src->data, bytes);
     } else if (dst->device == PIMI_DEVICE_CUDA && src->device == PIMI_DEVICE_CUDA) {
-        g_cuda.cuMemcpyDtoD_v2((CUdeviceptr)(uintptr_t)dst->data, (CUdeviceptr)(uintptr_t)src->data, bytes);
+        res = g_cuda.cuMemcpyDtoD_v2((CUdeviceptr)(uintptr_t)dst->data, (CUdeviceptr)(uintptr_t)src->data, bytes);
+    }
+
+    if (res != CUDA_SUCCESS) {
+        fprintf(stderr, "pimi: cuMemcpy failed (%d)\n", res);
+        return -2;
     }
     return 0;
 }
+
 
 int pimi_tensor_zero(Tensor *t) {
     if (!t || !t->data) return -1;

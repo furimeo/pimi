@@ -37,18 +37,26 @@ int cuda_drv_init(CudaContext *ctx) {
     LOAD(cuLaunchKernel);
     LOAD(cuMemGetInfo_v2);
 
-    if (ctx->cuInit(0) != CUDA_SUCCESS) return -2;
+    if (ctx->cuInit(0) != CUDA_SUCCESS) {
+        cuda_drv_cleanup(ctx);
+        return -2;
+    }
 
     int dev_count = 0;
-    ctx->cuDeviceGetCount(&dev_count);
-    if (dev_count <= 0) return -3;
+    if (ctx->cuDeviceGetCount(&dev_count) != CUDA_SUCCESS || dev_count <= 0) {
+        cuda_drv_cleanup(ctx);
+        return -3;
+    }
 
     ctx->cuDeviceGet(&ctx->dev, 0);
     ctx->cuDeviceGetName(ctx->devName, sizeof(ctx->devName), ctx->dev);
     ctx->cuDeviceComputeCapability(&ctx->ccMajor, &ctx->ccMinor, ctx->dev);
     ctx->cuDeviceTotalMem_v2(&ctx->totalMem, ctx->dev);
 
-    if (ctx->cuCtxCreate_v2(&ctx->ctx, 0, ctx->dev) != CUDA_SUCCESS) return -4;
+    if (ctx->cuCtxCreate_v2(&ctx->ctx, 0, ctx->dev) != CUDA_SUCCESS) {
+        cuda_drv_cleanup(ctx);
+        return -4;
+    }
 
     size_t free_b = 0, total_b = 0;
     ctx->cuMemGetInfo_v2(&free_b, &total_b);
@@ -56,6 +64,7 @@ int cuda_drv_init(CudaContext *ctx) {
 
     return 0;
 }
+
 
 void cuda_drv_cleanup(CudaContext *ctx) {
     if (ctx->ctx) {

@@ -31,7 +31,7 @@ generated 60 tokens in 12349.8 ms (4.86 tok/s)
 ### how it works
 
 - **driver api + ptx JIT**: loads `C:\Windows\System32\nvcuda.dll` at runtime. driver compiles PTX (`sm_20`) on the fly. no cuda SDK needed.
-- **hybrid placement**: weights and activation loop live 100% on VRAM (~435 MB total).
+- **hybrid placement**: weights and activations live on VRAM (~435 MB total). GEMM, LayerNorm, GELU, and LM head projection execute directly on CUDA. For causal multi-head attention, Q, K, V are briefly staged through host memory (~96 KB per step at seq=32) for causal masked softmax on CPU, avoiding Fermi `sm_21` shared-memory architecture quirks with negligible transfer cost.
 - **pcie avoidance**: only slices and projects the last hidden state $[1, 768] \times [768, 50257]$ through LM head. copies 200 KB to host for CPU sampling instead of dumping 20 MB across PCIe every step.
 - **bpe tokenizer**: pure C with an open-addressing hash table and custom scanner. zero external regex libraries, loads in 1 ms, exact match with HF tokenizer.
 - **fun bug**: gpt-neo self-attention does *not* scale by $\sqrt{d_{head}}$ ($scores = Q K^T$). took me two hours to realize why it was repeating words until i checked `GPTNeoSelfAttention` in transformers.
